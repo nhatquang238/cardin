@@ -1,0 +1,14 @@
+{
+  "name": "cardin",
+  "version": "0.0.1",
+  "description": "A fun project to learn more about koajs, scraping and react",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "author": "nhatquang238",
+  "license": "ISC",
+  "dependencies": {
+    "bgg": "^0.2.2"
+  }
+}
