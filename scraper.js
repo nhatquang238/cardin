@@ -6,10 +6,13 @@ const util = require('util');
 const rp = require('request-promise');
 const cheerio = require('cheerio');
 const db = require('./lib/db');
+const logger = require('debug')('scraper');
+const Promise = require('bluebird');
+
 const fullScrapeURI = 'https://boardgamegeek.com/browse/boardgame';
 const basePageURI = 'https://boardgamegeek.com/browse/boardgame/page/';
-
-var boardgameIds = [];
+const BATCHSIZE = 1;
+var boardgames = [];
 
 function log(input, depth) {
 		if (typeof depth === 'undefined') {
@@ -27,7 +30,7 @@ function fetchBoardGameByPageNumber(pageNumber) {
 		return rp(options);
 }
 
-function getAllBoardGameIdsOnPage($) {
+function getAllBoardGameIdsOnPage($, boardgameIds) {
 		var re = /\/boardgame\/(\d+)\//;
 		
 		$('.collection_objectname a').each((index, elem) => {
@@ -41,7 +44,7 @@ function getAllBoardGameIdsOnPage($) {
 }
 
 function scrapeAllBoardGameIds() {
-		console.log('getting the directory...');
+		logger('getting the directory...');
 
 		var options = {
 				uri: fullScrapeURI,
@@ -62,20 +65,24 @@ function scrapeAllBoardGameIds() {
 						}
 						return futures;
 				})
-				.each(function(res) {
-						let $ = cheerio.load(res);
-						
-						getAllBoardGameIdsOnPage($);
-				})
-				.then(function(){
-						log(boardgameIds);
+				.all()
+				.then(function(reses) {
+						logger('%s directory pages were downloaded', reses.length);
+						var boardgameIds = [];
+						reses.forEach(function(res) {
+								let $ = cheerio.load(res);
+								
+								boardgameIds = getAllBoardGameIdsOnPage($, boardgameIds);
+						});
+
+						scrape(boardgameIds);
 				})
 				.catch(function(err) {
 						log(err);
 				});		
 }
 
-db.setup();
+// db.setup();
 
 // db.findBoardgameByName("Sheriff of Nottingham", function(err, result) {
 // 		log(result.id);
@@ -85,27 +92,67 @@ db.setup();
 // 		log(result);
 // });
 
-bgg('thing', {id: '157969', type: 'boardgame', videos: '1'})
-		.then(function(res){
-				var boardgame = res.items.item;
-				boardgame.name = boardgame.name[0].value;
-				boardgame.maxplayers = boardgame.maxplayers.value;
-				boardgame.maxplaytime = boardgame.maxplaytime.value;
-				boardgame.minage = boardgame.minage.value;
-				boardgame.minplayers = boardgame.minplayers.value;
-				boardgame.maxplaytime = boardgame.maxplaytime.value;
-				boardgame.playingtime = boardgame.playingtime.value;
-				boardgame.yearpublished = boardgame.yearpublished.value;
+// bgg('thing', {id: '157969', type: 'boardgame', videos: '1'})
+// 		.then(function(res){
+// 				var boardgame = res.items.item;
+// 				boardgame.name = boardgame.name[0].value;
+// 				boardgame.maxplayers = boardgame.maxplayers.value;
+// 				boardgame.maxplaytime = boardgame.maxplaytime.value;
+// 				boardgame.minage = boardgame.minage.value;
+// 				boardgame.minplayers = boardgame.minplayers.value;
+// 				boardgame.maxplaytime = boardgame.maxplaytime.value;
+// 				boardgame.playingtime = boardgame.playingtime.value;
+// 				boardgame.yearpublished = boardgame.yearpublished.value;
 				
-				delete boardgame.id;
+// 				delete boardgame.id;
 
-				db.saveBoardgame(boardgame, function(err, id) {
-						if (id) {
-								console.log(id);
+// 				db.saveBoardgame(boardgame, function(err, id) {
+// 						if (id) {
+// 								console.log(id);
+// 						}
+// 				});
+// 		});
+
+scrapeAllBoardGameIds();
+
+function scrape(boardgameIds) {
+		var batch = boardgameIds.splice(0, BATCHSIZE);
+		var futures = [];
+
+		for (let i=0; i < batch.length; i++) {
+				futures.push(fetchBoardGameById(batch[i]));
+		}
+
+		Promise.all(futures)
+				.then(function (reses) {
+						reses.forEach(function (res) {
+								var boardgame = res.items.item;
+								boardgame.name = boardgame.name[0].value;
+								boardgame.maxplayers = boardgame.maxplayers.value;
+								boardgame.maxplaytime = boardgame.maxplaytime.value;
+								boardgame.minage = boardgame.minage.value;
+								boardgame.minplayers = boardgame.minplayers.value;
+								boardgame.maxplaytime = boardgame.maxplaytime.value;
+								boardgame.playingtime = boardgame.playingtime.value;
+								boardgame.yearpublished = boardgame.yearpublished.value;
+				
+								delete boardgame.id;
+								
+								boardgames.push(boardgame);
+						});
+
+						if (boardgameIds.length === 0) {
+								logger('%s boardgames downloaded', boardgames.length);
+						} else {
+								logger('%s boardgames remaining...', boardgameIds.length);
+								scrape(boardgameIds);
 						}
+				})
+				.catch(function (err) {
+						scrape(boardgameIds);
 				});
-		});
+}
 
-// scrapeAllBoardGameIds();
-
-
+function fetchBoardGameById(id) {
+		return bgg('thing', {id: id, type: 'boardgame', videos: '1'});
+}
