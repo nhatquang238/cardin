@@ -1,7 +1,6 @@
 // "use strict";
 require('babel-core').transform('code');
 
-const bgg = require('bgg');
 const util = require('util');
 const rp = require('request-promise');
 const cheerio = require('cheerio');
@@ -11,11 +10,14 @@ const Promise = require('bluebird');
 const Agent = require('socks5-https-client/lib/Agent');
 const chalk = require('chalk');
 const fs = require('fs');
+const randomUA = require('random-useragent');
 const Nightcrawler = new require('nightcrawler');
+const parser = require('xml2json');
 
 const fullScrapeURI = 'https://boardgamegeek.com/browse/boardgame';
 const basePageURI = 'https://boardgamegeek.com/browse/boardgame/page/';
-const BATCHSIZE = 1;
+const bggAPIRoot = 'https://boardgamegeek.com/xmlapi2/';
+const BATCHSIZE = 10;
 const nightcrawlerOpts = {
 		proxy: 'http://localhost:8123',
 		tor: {
@@ -28,13 +30,6 @@ const nightcrawler = new Nightcrawler(nightcrawlerOpts);
 var boardgames = [];
 var totalMiss = 0;
 
-function log(input, depth) {
-		if (typeof depth === 'undefined') {
-				depth = null;
-		}
-		console.log(util.inspect(input, {showHidden: true, depth: depth}));
-}
-
 function fetchBoardGameByPageNumber(pageNumber) {
 		var options = {
 				uri: pageNumber,
@@ -42,6 +37,9 @@ function fetchBoardGameByPageNumber(pageNumber) {
 				agentClass: Agent,
 				agentOptions: {
 						socksPort: 9050
+				},
+				headers: {
+						'User-Agent': randomUA.getRandom()
 				}
 		};
 
@@ -104,40 +102,9 @@ function scrapeAllBoardGameIds() {
 						scrape(boardgameIds);
 				})
 				.catch(function(err) {
-						log(err);
+						logger(err);
 				});		
 }
-
-// db.setup();
-
-// db.findBoardgameByName("Sheriff of Nottingham", function(err, result) {
-// 		log(result.id);
-// });
-
-// db.findBoardgameById("3e6a8d79-0524-4c51-8d0a-1ed5a7a0b268", function(err, result) {
-// 		log(result);
-// });
-
-// bgg('thing', {id: '157969', type: 'boardgame', videos: '1'})
-// 		.then(function(res){
-// 				var boardgame = res.items.item;
-// 				boardgame.name = boardgame.name[0].value;
-// 				boardgame.maxplayers = boardgame.maxplayers.value;
-// 				boardgame.maxplaytime = boardgame.maxplaytime.value;
-// 				boardgame.minage = boardgame.minage.value;
-// 				boardgame.minplayers = boardgame.minplayers.value;
-// 				boardgame.maxplaytime = boardgame.maxplaytime.value;
-// 				boardgame.playingtime = boardgame.playingtime.value;
-// 				boardgame.yearpublished = boardgame.yearpublished.value;
-
-// 				delete boardgame.id;
-
-// 				db.saveBoardgame(boardgame, function(err, id) {
-// 						if (id) {
-// 								console.log(id);
-// 						}
-// 				});
-// 		});
 
 function scrape(boardgameIds) {
 		nightcrawler.changeIp().then(function(ip) {
@@ -145,10 +112,11 @@ function scrape(boardgameIds) {
 
 				_scrapeCb();
 		});
-
+		
 		function _scrapeCb() {
 				var batch = boardgameIds.splice(0, BATCHSIZE);
 				var futures = [];
+				var hitCount = 0;
 
 				for (var i=0; i < batch.length; i++) {
 						futures.push(fetchBoardGameById(batch[i]));
@@ -157,39 +125,70 @@ function scrape(boardgameIds) {
 				Promise.all(futures)
 						.then(function (reses) {
 								reses.forEach(function (res) {
-										var boardgame = res.items.item;
-										boardgame.name = boardgame.name[0].value;
-										boardgame.maxplayers = boardgame.maxplayers.value;
-										boardgame.maxplaytime = boardgame.maxplaytime.value;
-										boardgame.minage = boardgame.minage.value;
-										boardgame.minplayers = boardgame.minplayers.value;
-										boardgame.maxplaytime = boardgame.maxplaytime.value;
-										boardgame.playingtime = boardgame.playingtime.value;
-										boardgame.yearpublished = boardgame.yearpublished.value;
-										
-										delete boardgame.id;
-										
-										boardgames.push(boardgame);
+										var boardgame = parseBoardgame(res);
+										db.saveBoardgame(boardgame, function(err, key) {
+												if (!err) {
+														logger('saved as %s', key);
+														boardgames.push(key);
+														hitCount += 1;
+												}
+										});
 								});
 
 								if (boardgameIds.length === 0) {
 										logger('--------------------------------------');
-										logger('%s boardgames downloaded', boardgames.length);
+										logger(chalk.green('%s boardgames downloaded'), boardgames.length);
 								} else {
 										logger('%s boardgames remaining...', boardgameIds.length);
 										scrape(boardgameIds);
 								}
 						})
 						.catch(function (err) {
-								totalMiss += 1;
-								logger(chalk.red('missing a boardgame!!! total miss is now: %s'), totalMiss);
+								totalMiss += (BATCHSIZE - hitCount);
+								logger(chalk.red('missing boardgame!!! total miss is now: %s'), totalMiss);
 								scrape(boardgameIds);
 						});				
 		}
 }
 
 function fetchBoardGameById(id) {
-		return bgg('thing', {id: id, type: 'boardgame', videos: '1'});
+		return rp({
+				uri: bggAPIRoot + 'thing/',
+				qs: {
+						id: id,
+						type: 'boardgame',
+						videos: 1
+				},
+				agentClass: Agent,
+				agentOptions: {
+						socksPort: 9050
+				},
+				headers: {
+						'User-Agent': randomUA.getRandom()
+				}				
+		});
 }
 
-scrapeAllBoardGameIds();
+function parseBoardgame(res) {
+		var boardgame = JSON.parse(parser.toJson(res)).items.item;
+
+		boardgame.name = boardgame.name[0].value || null;
+		boardgame.maxplayers = boardgame.maxplayers.value || null;
+		boardgame.maxplaytime = boardgame.maxplaytime.value || null;
+		boardgame.minage = boardgame.minage.value || null;
+		boardgame.minplayers = boardgame.minplayers.value || null;
+		boardgame.maxplaytime = boardgame.maxplaytime.value || null;
+		boardgame.playingtime = boardgame.playingtime.value || null;
+		boardgame.yearpublished = boardgame.yearpublished.value || null;
+		
+		delete boardgame.id;
+
+		return boardgame;
+}
+
+function run() {
+		db.setup();
+		scrapeAllBoardGameIds();		
+}
+
+run();
